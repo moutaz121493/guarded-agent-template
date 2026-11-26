@@ -47,6 +47,20 @@ curl -s -X POST http://127.0.0.1:8081/v1/run \
   -d '{"task": "Restart worker-queue container"}' | jq
 ```
 
+## Running it for real
+
+The author runs this template 24/7 on a Raspberry Pi 5 (4 GB) next to his homelab:
+
+- `AGENT_PROVIDER=groq` (OpenAI-compatible, Groq free tier, `openai/gpt-oss-20b`), `LLM_ANSWER=1` for answers in English, German or Arabic.
+- `HEALTH_SNAPSHOT_DIR` points at a **read-only** mount of the Uptime Kuma status export, so health answers use real monitors. The agent has no Docker socket.
+- `RESTART_MODE=dry-run`: the approval flow is real, the restart is not.
+- `KB_PATH`: a small JSON file of real (public) homelab facts instead of the sample documents.
+- Container: `read_only`, `cap_drop: ALL`, `no-new-privileges`, 128 MB / 0.5 CPU limits.
+
+`GET /v1/stats?days=30` returns the measured numbers from the SQLite run log (no task text is stored):
+runs per status, p50/p95 end-to-end and planner latency, and total cost. If the provider fails (network, quota,
+invalid JSON), the run degrades to the offline planner instead of erroring, and `last_planner_error` says why.
+
 ## Automated Evaluation Harness
 
 Every push runs `python3 evals/run_evals.py --provider mock` against `evals/dataset.jsonl` (12 multilingual EN/DE/AR cases covering read-only retrieval, HITL mutating actions, and prompt-injection blocks) and fails CI if pass rate drops below 100%.

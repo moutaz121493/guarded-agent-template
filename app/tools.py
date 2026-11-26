@@ -1,7 +1,10 @@
 """Pluggable tool registry with strict read-only vs. mutating classification."""
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -47,8 +50,40 @@ MOCK_SERVICES = {
 NOTES_STORE: list[dict[str, str]] = []
 
 
+def _live_snapshot() -> dict[str, Any] | None:
+    """Real health from a read-only snapshot directory (HEALTH_SNAPSHOT_DIR), e.g. files written by Uptime Kuma
+    exporters on the host: services.json ({"groups": [{"items": [{"name", "status" 1/0, "ping"}]}]}) and optional
+    status.json ({"sys": {...}, "backup_state": ...}). The agent never talks to Docker itself."""
+    root = os.getenv("HEALTH_SNAPSHOT_DIR", "").strip()
+    if not root:
+        return None
+    try:
+        services = json.loads((Path(root) / "services.json").read_text())
+    except (OSError, ValueError):
+        return None
+    items = [it for g in services.get("groups", []) for it in g.get("items", [])]
+    system: dict[str, Any] = {}
+    try:
+        st = json.loads(Path(os.getenv("HEALTH_STATUS_PATH") or Path(root) / "status.json").read_text())
+        sy = st.get("sys", {})
+        system = {"temp_c": sy.get("temp_c"), "ram_pct": sy.get("mem_pct"), "load": sy.get("load"), "last_backup": st.get("backup_state")}
+    except (OSError, ValueError):
+        pass
+    return {"items": items, "system": system}
+
+
 def tool_check_service_health(args: dict[str, Any]) -> dict[str, Any]:
     target = str(args.get("service", "")).strip().lower()
+    live = _live_snapshot()
+    if live is not None:
+        items = live["items"]
+        if target:
+            hit = next((it for it in items if target in it["name"].lower() or it["name"].lower() in target), None)
+            if not hit:
+                return {"service": target, "status": "unknown", "system": live["system"]}
+            return {"service": hit["name"], "status": "healthy" if hit.get("status") == 1 else "down", "ping_ms": hit.get("ping"), "system": live["system"]}
+        down = {it["name"]: {"status": "down"} for it in items if it.get("status") != 1}
+        return {"total_services": len(items), "healthy_count": len(items) - len(down), "degraded": down, "system": live["system"]}
     if target and target in MOCK_SERVICES:
         return {"service": target, **MOCK_SERVICES[target]}
     degraded = {k: v for k, v in MOCK_SERVICES.items() if v["status"] != "healthy"}
@@ -59,11 +94,22 @@ def tool_check_service_health(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _kb() -> list[dict[str, str]]:
+    """KB_PATH = a JSON list of {"id", "title", "content"} for real deployments; otherwise the sample documents."""
+    path = os.getenv("KB_PATH", "").strip()
+    if path:
+        try:
+            return json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            return []
+    return SAMPLE_KB
+
+
 def tool_search_kb(args: dict[str, Any]) -> dict[str, Any]:
     query = str(args.get("query", "")).lower()
     tokens = [t for t in query.replace("?", " ").replace(",", " ").split() if len(t) > 2]
     scored = []
-    for doc in SAMPLE_KB:
+    for doc in _kb():
         hay = (doc["title"] + " " + doc["content"]).lower()
         hits = sum(1 for tok in tokens if tok in hay)
         if hits > 0:
@@ -82,6 +128,10 @@ def tool_draft_note(args: dict[str, Any]) -> dict[str, Any]:
 
 def tool_restart_service(args: dict[str, Any]) -> dict[str, Any]:
     service = str(args.get("service", "")).strip().lower()
+    if os.getenv("RESTART_MODE", "mock").strip().lower() == "dry-run":
+        # live deployments: the approval flow is real, the restart is not (the agent has no Docker access on purpose)
+        return {"restarted": False, "dry_run": True, "service": service,
+                "note": f"Approved. Dry-run deployment: `{service}` was NOT restarted; this agent has no access to Docker."}
     if service not in MOCK_SERVICES:
         return {"restarted": False, "error": f"Unknown service '{service}'. Allowed: {sorted(MOCK_SERVICES)}"}
     MOCK_SERVICES[service]["status"] = "healthy"

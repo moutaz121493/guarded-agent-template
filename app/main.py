@@ -54,6 +54,11 @@ def approve_action(req: ApprovalRequest) -> dict:
     return agent.approve(code=req.code, approved=req.approved)
 
 
+@app.get("/v1/stats")
+def run_stats(days: int = 30) -> dict:
+    return {"provider": agent.provider, "last_planner_error": agent.last_planner_error, **ledger.stats(max(1, min(days, 365)))}
+
+
 @app.get("/v1/traces")
 def list_traces() -> dict:
     return {"count": len(agent.recent_traces), "traces": agent.recent_traces}

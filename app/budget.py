@@ -42,6 +42,42 @@ class BudgetLedger:
                 )
                 """
             )
+            # one row per agent run (no task text: only what is needed to measure the service)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_log (
+                    ts TEXT NOT NULL, status TEXT NOT NULL, provider TEXT NOT NULL, tool TEXT,
+                    latency_ms INTEGER NOT NULL, plan_ms INTEGER, cost_usd REAL NOT NULL
+                )
+                """
+            )
+
+    def log_run(self, status: str, provider: str, tool: str | None, latency_ms: int, plan_ms: int | None, cost_usd: float) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO run_log (ts, status, provider, tool, latency_ms, plan_ms, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(timespec="seconds"), status, provider, tool, int(latency_ms), plan_ms, float(cost_usd)),
+            )
+
+    def stats(self, days: int = 30) -> dict:
+        """Measured numbers for the last `days` days: runs per status, p50/p95 latency, total cost."""
+        since = datetime.now(timezone.utc).timestamp() - days * 86400
+        with self._lock, self._connect() as conn:
+            rows = [r for r in conn.execute("SELECT * FROM run_log ORDER BY ts") if datetime.fromisoformat(r["ts"]).timestamp() >= since]
+        def pct(xs: list[int], q: float):
+            xs = sorted(x for x in xs if x is not None)
+            return xs[min(len(xs) - 1, int(len(xs) * q))] if xs else None
+        by_status: dict[str, int] = {}
+        for r in rows:
+            by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+        llm = [r["plan_ms"] for r in rows if r["provider"] != "mock" and r["plan_ms"] is not None]
+        return {
+            "days": days, "runs": len(rows), "by_status": by_status,
+            "first_run": rows[0]["ts"] if rows else None,
+            "latency_ms_p50": pct([r["latency_ms"] for r in rows], .5), "latency_ms_p95": pct([r["latency_ms"] for r in rows], .95),
+            "planner_ms_p50": pct(llm, .5), "planner_ms_p95": pct(llm, .95),
+            "cost_usd_total": round(sum(r["cost_usd"] for r in rows), 6),
+        }
 
     def _totals(self, conn: sqlite3.Connection, today: str, month: str) -> tuple[float, float]:
         day_sum = conn.execute(
