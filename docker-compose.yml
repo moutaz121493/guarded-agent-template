@@ -1,0 +1,19 @@
+services:
+  guarded-agent:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${AGENT_BIND_HOST:-127.0.0.1}:${AGENT_PORT:-8081}:8081"
+    environment:
+      AGENT_PROVIDER: ${AGENT_PROVIDER:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-haiku-latest}
+      BUDGET_DB_PATH: /data/budget.db
+      DAILY_BUDGET_USD: ${DAILY_BUDGET_USD:-1.00}
+      MONTHLY_BUDGET_USD: ${MONTHLY_BUDGET_USD:-10.00}
+    volumes:
+      - agent_data:/data
+    mem_limit: 128m
+
+volumes:
+  agent_data:
