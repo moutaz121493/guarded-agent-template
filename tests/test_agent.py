@@ -113,3 +113,11 @@ def test_provider_error_falls_back_to_offline_planner(tmp_path: Path, monkeypatc
     ag = GuardedAgent(ledger=BudgetLedger(tmp_path / "b.db"), provider="groq")
     assert ag.run("Check homelab container health status").status == "completed"
     assert "network down" in ag.last_planner_error
+
+
+def test_live_lookup_ignores_spaces_from_speech(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from app.tools import tool_check_service_health
+    (tmp_path / "services.json").write_text(json.dumps({"groups": [{"items": [{"name": "Vaultwarden", "status": 1, "ping": 2}]}]}))
+    monkeypatch.setenv("HEALTH_SNAPSHOT_DIR", str(tmp_path))
+    assert tool_check_service_health({"service": "Vault Warden"})["status"] == "healthy"

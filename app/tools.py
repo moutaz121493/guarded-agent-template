@@ -78,7 +78,9 @@ def tool_check_service_health(args: dict[str, Any]) -> dict[str, Any]:
     if live is not None:
         items = live["items"]
         if target:
-            hit = next((it for it in items if target in it["name"].lower() or it["name"].lower() in target), None)
+            norm = lambda x: "".join(ch for ch in x.lower() if ch.isalnum())   # "Vault Warden" (speech) == "Vaultwarden"
+            t = norm(target)
+            hit = next((it for it in items if t and (t in norm(it["name"]) or norm(it["name"]) in t)), None)
             if not hit:
                 return {"service": target, "status": "unknown", "system": live["system"]}
             return {"service": hit["name"], "status": "healthy" if hit.get("status") == 1 else "down", "ping_ms": hit.get("ping"), "system": live["system"]}
