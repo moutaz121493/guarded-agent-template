@@ -198,3 +198,27 @@ def test_loose_job_name_resolved_before_approval(tmp_path: Path, monkeypatch) ->
         assert "Which one?" in ag.run("admin run something", channel="whatsapp").answer
     finally:
         tools.REGISTRY.clear(); tools.REGISTRY.update(saved)
+
+
+def test_todo_tools_add_list_done(tmp_path: Path, monkeypatch) -> None:
+    from app import tools
+    store = [{"id": 5, "text": "old task", "prio": "normal", "status": "open"}]
+    def fake(route, body=None):
+        if route == "add":
+            it = {"id": 6, "text": body["text"], "prio": body.get("prio", "normal"), "status": "open"}; store.append(it); return {"item": it}
+        if route == "list":
+            return {"items": store}
+        if route == "update":
+            it = next(x for x in store if x["id"] == body["id"]); it["status"] = body["status"]; return {"item": it}
+    monkeypatch.setattr(tools, "_todo_req", fake)
+    saved = dict(tools.REGISTRY); tools.register_todo_tools()
+    try:
+        ag = make_agent(tmp_path)
+        r = ag.run("todo buy a new HDD cable", channel="whatsapp")
+        assert r.status == "completed" and store[-1]["text"] == "buy a new HDD cable"
+        r = ag.run("show my todo list", channel="whatsapp")
+        assert "buy a new HDD cable" in r.answer or r.status == "completed"
+        ag.run("todo done 5", channel="whatsapp")
+        assert store[0]["status"] == "done"
+    finally:
+        tools.REGISTRY.clear(); tools.REGISTRY.update(saved)

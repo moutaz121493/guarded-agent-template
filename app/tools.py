@@ -298,3 +298,54 @@ def register_maint_tools() -> None:
 
 if maint.enabled():
     register_maint_tools()
+
+
+# ---------- optional to-do list backend (TODO_URL): add / list / complete personal tasks ----------
+def _todo_req(route: str, body: dict | None = None) -> Any:
+    import urllib.request
+    url = os.getenv("TODO_URL", "").rstrip("/") + "/" + route
+    hdr = {"Content-Type": "application/json", "Origin": os.getenv("TODO_ORIGIN", "")}
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
+                                 method="POST" if body is not None else "GET", headers=hdr)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode())
+
+
+def tool_todo_add(args: dict[str, Any]) -> dict[str, Any]:
+    text = " ".join(str(args.get("text", "")).split())[:500]
+    if not text:
+        return {"added": False, "error": "empty task"}
+    body = {"text": text}
+    if str(args.get("prio", "")).lower() in ("high", "low"):
+        body["prio"] = str(args["prio"]).lower()
+    item = _todo_req("add", body)["item"]
+    return {"added": True, "id": item["id"], "text": item["text"], "prio": item["prio"]}
+
+
+def tool_todo_list(args: dict[str, Any]) -> dict[str, Any]:
+    items = [x for x in _todo_req("list")["items"] if x.get("status") == "open"]
+    order = {"high": 0, "normal": 1, "low": 2}
+    items.sort(key=lambda x: (order.get(x.get("prio"), 1), -x["id"]))
+    return {"open_count": len(items), "items": [{"id": x["id"], "text": x["text"][:140], "prio": x["prio"]} for x in items[:12]]}
+
+
+def tool_todo_done(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        tid = int(str(args.get("id", "")).lstrip("#"))
+    except ValueError:
+        return {"done": False, "error": "which number? (e.g. todo done 87)"}
+    try:
+        item = _todo_req("update", {"id": tid, "status": "done"})["item"]
+    except Exception:
+        return {"done": False, "error": f"no task #{tid}"}
+    return {"done": True, "id": item["id"], "text": item["text"][:140]}
+
+
+def register_todo_tools() -> None:
+    REGISTRY["todo_add"] = ToolSpec("todo_add", "Add a task to the personal to-do list (args text, optional prio high|low). Use for 'todo ...', 'remind me to ...', 'add to my list'.", False, tool_todo_add)
+    REGISTRY["todo_list"] = ToolSpec("todo_list", "Show the open tasks on the personal to-do list.", False, tool_todo_list)
+    REGISTRY["todo_done"] = ToolSpec("todo_done", "Mark a to-do task done by its number (args id).", False, tool_todo_done)
+
+
+if os.getenv("TODO_URL", "").strip():
+    register_todo_tools()

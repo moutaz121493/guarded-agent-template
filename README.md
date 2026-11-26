@@ -74,6 +74,13 @@ The agent itself still has no shell, Docker or root access.
 - **Approval**: every change asks `<what exactly>? Reply YES <code> within 10 min`; codes expire.
 - **Chat can never**: reboot, delete or run free-form commands (`CHAT_ACTIONS` allowlist).
 
+## Personal to-do list (optional)
+
+`TODO_URL` (+ `TODO_ORIGIN` if the backend checks Origin) adds `todo_add`, `todo_list` and `todo_done`:
+"todo buy a new cable", "what's on my to-do list?", "todo done 87". These are personal data, not system actions,
+so they don't need the admin keyword or an approval code. Backend contract: `GET list`, `POST add {text, prio?}`,
+`POST update {id, status}`.
+
 ## Automated Evaluation Harness
 
 Every push runs `python3 evals/run_evals.py --provider mock` against `evals/dataset.jsonl` (12 multilingual EN/DE/AR cases covering read-only retrieval, HITL mutating actions, and prompt-injection blocks) and fails CI if pass rate drops below 100%.
