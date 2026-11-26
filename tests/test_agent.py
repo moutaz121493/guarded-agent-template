@@ -121,3 +121,80 @@ def test_live_lookup_ignores_spaces_from_speech(tmp_path: Path, monkeypatch) -> 
     (tmp_path / "services.json").write_text(json.dumps({"groups": [{"items": [{"name": "Vaultwarden", "status": 1, "ping": 2}]}]}))
     monkeypatch.setenv("HEALTH_SNAPSHOT_DIR", str(tmp_path))
     assert tool_check_service_health({"service": "Vault Warden"})["status"] == "healthy"
+
+
+def _maint_agent(tmp_path: Path, monkeypatch, runs: list):
+    from app import maint, tools
+    monkeypatch.setattr(maint, "status", lambda: {
+        "system": {"failed_units": ["rag-index.service"], "disks": [], "disk_errors": {"count": 0}, "throttled": "0x0"},
+        "units": [{"unit": "lifeos", "state": "failed"}], "containers": [{"name": "paperless-webserver-1", "state": "running", "status": "Up 2 hours"}],
+        "timers": [{"unit": "rag-index", "result": "exit-code"}], "backups": {"plans": []}, "updates": [{"pkg": "x"}],
+        "stacks": ["paperless"], "run_timers": ["Search index (Ask everything)"], "current": None, "history": []})
+    monkeypatch.setattr(maint, "run", lambda action, target="": runs.append((action, target)) or {"started": True, "job_id": "20261126-170000", "action": action, "target": target})
+    saved = dict(tools.REGISTRY)
+    tools.register_maint_tools()
+    monkeypatch.setenv("ADMIN_KEYWORD", "admin")
+    return make_agent(tmp_path), saved
+
+
+def test_admin_keyword_gates_system_tools_on_chat(tmp_path: Path, monkeypatch) -> None:
+    from app import tools
+    runs: list = []
+    ag, saved = _maint_agent(tmp_path, monkeypatch, runs)
+    try:
+        silent = ag.run("check errors please", channel="whatsapp")
+        assert silent.status == "ignored" and silent.answer == ""
+        ok = ag.run("admin check errors please", channel="whatsapp")
+        assert ok.status == "completed"
+        assert ag.run("check errors please", channel="demo").status == "completed"   # private demo page: no keyword needed
+        assert ag.run("administrator check errors", channel="whatsapp").status == "ignored"   # whole word only
+    finally:
+        tools.REGISTRY.clear(); tools.REGISTRY.update(saved)
+
+
+def test_admin_restart_needs_approval_then_runs_real_job(tmp_path: Path, monkeypatch) -> None:
+    from app import tools
+    runs: list = []
+    ag, saved = _maint_agent(tmp_path, monkeypatch, runs)
+    try:
+        res = ag.run("admin restart paperless", channel="whatsapp")
+        assert res.status == "awaiting_approval" and runs == []          # nothing happens before YES
+        out = ag.approve(res.approval_code)
+        assert out["status"] == "executed" and runs == [("restart-container", "paperless-webserver-1")]
+    finally:
+        tools.REGISTRY.clear(); tools.REGISTRY.update(saved)
+
+
+def test_problems_list_offers_fixes(tmp_path: Path, monkeypatch) -> None:
+    from app import maint
+    st = {"system": {"failed_units": ["rag-index.service"], "disks": [{"name": "HDD", "ok": False, "mounted": False}], "disk_errors": {"count": 2, "last": "x"}},
+          "units": [{"unit": "lifeos", "state": "failed"}], "containers": [{"name": "vaultwarden", "state": "exited", "status": "Exited (1)"}],
+          "timers": [], "backups": {"plans": [{"label": "HDD", "status": "error", "running": False}]}, "run_timers": ["Search index (Ask everything)"]}
+    probs = maint.problems(st)
+    fixes = [p["fix"] for p in probs if p["fix"]]
+    assert {"action": "run-timer", "target": "Search index (Ask everything)"} in fixes
+    assert {"action": "restart-service", "target": "lifeos"} in fixes
+    assert {"action": "restart-container", "target": "vaultwarden"} in fixes
+    assert any("kernel disk errors" in p["problem"] for p in probs) and any(f["action"] == "backup-now" for f in fixes)
+
+
+def test_chat_cannot_reboot() -> None:
+    from app import maint
+    assert maint.run("reboot")["started"] is False
+
+
+def test_loose_job_name_resolved_before_approval(tmp_path: Path, monkeypatch) -> None:
+    from app import tools
+    runs: list = []
+    ag, saved = _maint_agent(tmp_path, monkeypatch, runs)
+    try:
+        from app import maint
+        st = maint.status(); st["run_timers"] = ["Status refresh", "Search index (Ask everything)"]
+        monkeypatch.setattr(maint, "status", lambda: st)
+        monkeypatch.setattr(ag, "_plan", lambda task: ("fix", {"action": "run-timer", "target": "status refresh job"}, 0.0))
+        res = ag.run("admin run the status refresh", channel="whatsapp")
+        assert res.status == "awaiting_approval" and "`Status refresh`" in res.answer and res.pending_args["target"] == "Status refresh"
+        monkeypatch.setattr(ag, "_plan", lambda task: ("fix", {"action": "run-timer", "target": "something unknown"}, 0.0))
+        assert "Which one?" in ag.run("admin run something", channel="whatsapp").answer
+    finally:
+        tools.REGISTRY.clear(); tools.REGISTRY.update(saved)

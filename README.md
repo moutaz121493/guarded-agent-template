@@ -61,6 +61,19 @@ The author runs this template 24/7 on a Raspberry Pi 5 (4 GB) next to his homela
 runs per status, p50/p95 end-to-end and planner latency, and total cost. If the provider fails (network, quota,
 invalid JSON), the run degrades to the offline planner instead of erroring, and `last_planner_error` says why.
 
+## Real checks and fixes (optional)
+
+Set `MAINT_URL` to an allowlisted maintenance API (`GET /api/status`, `POST /api/run {action,target}`, `GET /api/job?id=`;
+contract in `app/maint.py`) and the agent gains `check_errors`, `fix`, `upgrade`, `job_status` and a real `restart_service`.
+The agent itself still has no shell, Docker or root access.
+
+- **Admin keyword**: with `ADMIN_KEYWORD=admin`, every system tool on chat channels (`ADMIN_CHANNELS`, default
+  `whatsapp,telegram`) needs that whole word in the message; without it the run is `ignored` and nothing is sent back.
+- **Exact targets before approval**: loose names ("the paperless thing", "status refresh job") are matched to the real
+  service, container, job or stack first; ambiguous names get "Which one? …" instead of a guess.
+- **Approval**: every change asks `<what exactly>? Reply YES <code> within 10 min`; codes expire.
+- **Chat can never**: reboot, delete or run free-form commands (`CHAT_ACTIONS` allowlist).
+
 ## Automated Evaluation Harness
 
 Every push runs `python3 evals/run_evals.py --provider mock` against `evals/dataset.jsonl` (12 multilingual EN/DE/AR cases covering read-only retrieval, HITL mutating actions, and prompt-injection blocks) and fails CI if pass rate drops below 100%.

@@ -54,6 +54,19 @@ def approve_action(req: ApprovalRequest) -> dict:
     return agent.approve(code=req.code, approved=req.approved)
 
 
+@app.get("/v1/maint/job")
+def maint_job(id: str) -> dict:
+    from . import maint
+    if not maint.enabled():
+        return {"error": "no maintenance backend"}
+    out = maint.job(id)
+    if not out.get("running"):   # finished: take ok/failed from the job history
+        hist = maint.status().get("history") or []
+        out["ok"] = next((h.get("ok") for h in hist if h.get("id") == id), None)
+    out["log"] = (out.get("log") or "")[-1500:]
+    return out
+
+
 @app.get("/v1/stats")
 def run_stats(days: int = 30) -> dict:
     return {"provider": agent.provider, "last_planner_error": agent.last_planner_error, **ledger.stats(max(1, min(days, 365)))}

@@ -14,6 +14,9 @@ class ToolSpec:
     description: str
     mutating: bool
     handler: Callable[[dict[str, Any]], dict[str, Any]]
+    admin: bool = False   # needs ADMIN_KEYWORD in the message on chat channels (see agent.py)
+    # optional: turn loose model args into exact ones BEFORE asking for approval -> (args, error, human description)
+    prepare: Callable[[dict[str, Any]], tuple[dict[str, Any], str | None, str]] | None = None
 
 
 SAMPLE_KB = [
@@ -167,3 +170,131 @@ REGISTRY: dict[str, ToolSpec] = {
         handler=tool_restart_service,
     ),
 }
+
+
+# ---------- optional real maintenance tools (MAINT_URL set): checks and fixes through an allowlisted API ----------
+from . import maint  # noqa: E402
+
+
+def tool_check_errors(args: dict[str, Any]) -> dict[str, Any]:
+    return maint.summary()
+
+
+def tool_fix(args: dict[str, Any]) -> dict[str, Any]:
+    return maint.run(str(args.get("action", "")), str(args.get("target", "") or ""))
+
+
+def tool_upgrade(args: dict[str, Any]) -> dict[str, Any]:
+    kind = str(args.get("kind", "system")).lower()
+    target = str(args.get("target", "") or "")
+    if kind == "stack" and target:
+        return maint.run("update-stack", target)
+    if kind == "rollback" and target:
+        return maint.run("rollback-stack", target)
+    return maint.run("apt-upgrade", "")
+
+
+def tool_job_status(args: dict[str, Any]) -> dict[str, Any]:
+    st = maint.status()
+    return {"running": st.get("current"), "last_jobs": (st.get("history") or [])[:3]}
+
+
+def _norm(x: str) -> str:
+    return "".join(ch for ch in str(x).lower() if ch.isalnum())
+
+
+def _best(want: str, names: list[str]) -> str | None:
+    """Exact-ish match of a spoken/loose name against known names (substring either way, then word overlap)."""
+    w = _norm(want)
+    if not w:
+        return None
+    for n in names:
+        if w == _norm(n):
+            return n
+    hits = [n for n in names if w in _norm(n) or _norm(n) in w]
+    if len(hits) == 1:
+        return hits[0]
+    words = {t for t in str(want).lower().replace("-", " ").split() if len(t) > 2 and t not in ("job", "the", "run", "now", "service", "container")}
+    scored = sorted(((len(words & set(n.lower().replace("(", " ").replace(")", " ").replace("-", " ").split())), n) for n in names), reverse=True)
+    return scored[0][1] if scored and scored[0][0] > 0 and (len(scored) == 1 or scored[0][0] > scored[1][0]) else None
+
+
+def _targets(st: dict[str, Any]) -> dict[str, list[str]]:
+    return {"restart-service": [u["unit"] for u in st.get("units", [])], "restart-container": [c["name"] for c in st.get("containers", [])],
+            "run-timer": list(st.get("run_timers", [])), "backup-now": list(st.get("plans", [])),
+            "update-stack": list(st.get("stacks", [])), "rollback-stack": list(st.get("stacks", []))}
+
+
+LABELS = {"restart-service": "Restart the service", "restart-container": "Restart the container", "run-timer": "Run the job now",
+          "backup-now": "Back up now", "clear-failed": "Clear the failed-services list", "apt-upgrade": "Install all system updates",
+          "apt-refresh": "Check for system updates", "update-stack": "Update the app stack", "rollback-stack": "Roll back the app stack"}
+
+
+def prepare_fix(args: dict[str, Any]) -> tuple[dict[str, Any], str | None, str]:
+    action, target = str(args.get("action", "")), str(args.get("target", "") or "")
+    if action not in maint.CHAT_ACTIONS:
+        return args, f"I can't do `{action}` from chat. I can: " + ", ".join(sorted(LABELS[a] for a in maint.CHAT_ACTIONS if a in LABELS)) + ".", ""
+    names = _targets(maint.status()).get(action)
+    if names is not None and action != "backup-now":
+        exact = _best(target, names)
+        if not exact:
+            return args, f"Which one? Options: {', '.join(names)}", ""
+        target = exact
+    elif action == "backup-now":
+        target = _best(target, names or []) or ""   # empty = all backup plans
+    desc = f"{LABELS.get(action, action)}{' ' + chr(96) + target + chr(96) if target else ''}"
+    return {"action": action, "target": target}, None, desc
+
+
+def prepare_upgrade(args: dict[str, Any]) -> tuple[dict[str, Any], str | None, str]:
+    kind = str(args.get("kind", "system")).lower()
+    if kind in ("stack", "rollback"):
+        stacks = _targets(maint.status())["update-stack"]
+        exact = _best(str(args.get("target", "")), stacks)
+        if not exact:
+            return args, f"Which app stack? Options: {', '.join(stacks)}", ""
+        return {"kind": kind, "target": exact}, None, f"{LABELS['update-stack' if kind == 'stack' else 'rollback-stack']} `{exact}`"
+    return {"kind": "system"}, None, LABELS["apt-upgrade"] + " (services may restart briefly)"
+
+
+def prepare_restart(args: dict[str, Any]) -> tuple[dict[str, Any], str | None, str]:
+    st = _targets(maint.status())
+    want = str(args.get("service", ""))
+    unit = _best(want, st["restart-service"])
+    if unit:
+        return {"service": unit}, None, f"{LABELS['restart-service']} `{unit}`"
+    cont = _best(want, st["restart-container"])
+    if cont:
+        return {"service": cont}, None, f"{LABELS['restart-container']} `{cont}`"
+    several = [n for n in st["restart-service"] + st["restart-container"] if _norm(want) and _norm(want) in _norm(n)]
+    if several:
+        return args, f"Which one? {', '.join(several)}", ""
+    return args, f"No service or container matches `{want}`.", ""
+
+
+def tool_restart_real(args: dict[str, Any]) -> dict[str, Any]:
+    """Restart via the maintenance API: a known systemd unit or an existing container (fuzzy name match)."""
+    want = "".join(ch for ch in str(args.get("service", "")).lower() if ch.isalnum())
+    st = maint.status()
+    norm = lambda x: "".join(ch for ch in x.lower() if ch.isalnum())
+    unit = next((u["unit"] for u in st.get("units", []) if want and (want in norm(u["unit"]) or norm(u["unit"]) in want)), None)
+    if unit:
+        return maint.run("restart-service", unit)
+    cont = next((c["name"] for c in st.get("containers", []) if want and (want in norm(c["name"]) or norm(c["name"]) in want)), None)
+    if cont:
+        return maint.run("restart-container", cont)
+    return {"started": False, "error": f"No service or container matches `{args.get('service')}`."}
+
+
+def register_maint_tools() -> None:
+    REGISTRY["check_service_health"] = ToolSpec(REGISTRY["check_service_health"].name, REGISTRY["check_service_health"].description,
+                                                False, REGISTRY["check_service_health"].handler, admin=True)
+    REGISTRY["check_errors"] = ToolSpec("check_errors", "Deep check: errors, failed services/timers, stopped containers, disk errors, backups AND whether system updates are pending.", False, tool_check_errors, admin=True)
+    REGISTRY["fix"] = ToolSpec("fix", "Run one fix: restart-service, restart-container, run-timer (run a scheduled job now), backup-now or clear-failed (args action, target).", True, tool_fix, admin=True, prepare=prepare_fix)
+    REGISTRY["upgrade"] = ToolSpec("upgrade", "INSTALL system updates (kind=system), update one app stack (kind=stack, target) or roll one back (kind=rollback, target). Only when asked to install/upgrade, not to check.", True, tool_upgrade, admin=True, prepare=prepare_upgrade)
+    REGISTRY["job_status"] = ToolSpec("job_status", "Status of the running/last maintenance jobs.", False, tool_job_status, admin=True)
+    REGISTRY["restart_service"] = ToolSpec("restart_service", "Restart a service or container by name. Mutating — needs approval.", True, tool_restart_real, admin=True, prepare=prepare_restart)
+
+
+if maint.enabled():
+    register_maint_tools()
